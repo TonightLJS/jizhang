@@ -100,6 +100,49 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
+  // 当前时间 HH:MM（精确到分钟）。date 仍只存到日，时间单独放 time 字段，
+  // 这样所有按「日 / 月 / 日期区间」的比较与 slice(0,7) 逻辑都不用改。
+  function nowTime() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  /** 把各种写法的时间规整成 HH:MM；无效则返回 '' */
+  function normTime(v) {
+    if (v == null || v === '') return '';
+    const m = String(v).trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return '';
+    const h = Number(m[1]), mi = Number(m[2]);
+    if (h < 0 || h > 23 || mi < 0 || mi > 59) return '';
+    return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
+  }
+
+  /** 从毫秒时间戳还原 HH:MM（用于给历史数据补 time） */
+  function timeFromTs(ts) {
+    const d = new Date(Number(ts));
+    if (isNaN(d.getTime())) return '';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  /** 记录的时间；历史数据没有 time 时返回 '' */
+  function txTime(x) {
+    if (!x || typeof x.time !== 'string') return '';
+    return normTime(x.time);
+  }
+
+  /** 明细排序键：日期 + 时间（未填时间的排在当天最早，即 00:00） */
+  function txSortKey(x) {
+    return (x.date || '') + ' ' + (txTime(x) || '00:00');
+  }
+
+  /** 展示用：date + time（无时间则只返回日期） */
+  function txDateTime(x) {
+    const t = txTime(x);
+    return t ? `${x.date || ''} ${t}` : (x.date || '');
+  }
+
   function round2(n) { return Math.round(Number(n) * 100) / 100; }
 
   function load() {
@@ -276,6 +319,20 @@
         const acc = data.accounts.find((a) => a.name === t.account);
         if (acc) { t.accountId = acc.id; changed = true; }
       }
+    });
+    // 历史数据补 time：优先用 createdAt 反推当时的时分（createdAt 是写入时的毫秒时间戳，
+    // 与 date 基本同一天，能还原出可信的录入时刻）；实在没有就留空，UI 会显示为「未记时间」。
+    data.transactions.forEach((t) => {
+      if (t.time == null) {
+        t.time = t.createdAt ? timeFromTs(t.createdAt) : '';
+        changed = true;
+      }
+    });
+    data.splits.forEach((s) => {
+      if (s.time == null) { s.time = s.createdAt ? timeFromTs(s.createdAt) : ''; changed = true; }
+    });
+    data.clears.forEach((c) => {
+      if (c.time == null) { c.time = c.createdAt ? timeFromTs(c.createdAt) : ''; changed = true; }
     });
     data.splits.forEach((s) => {
       if (!s.ledgerId) { s.ledgerId = def.id; changed = true; }
@@ -456,7 +513,7 @@
     const acc = data.accounts.find((a) => a.id === id);
     const txs = alive(data.transactions).filter((t) =>
       t.accountId === id || (t.type === 'transfer' && (t.fromId === id || t.toId === id))).slice()
-      .sort((a, b) => a.date.localeCompare(b.date) || ((a.createdAt || 0) - (b.createdAt || 0)));
+      .sort((a, b) => txSortKey(a).localeCompare(txSortKey(b)) || ((a.createdAt || 0) - (b.createdAt || 0)));
     let cur = acc ? (acc.initialBalance || 0) : 0;
     const items = txs.map((t) => {
       if (t.type === 'transfer') {
@@ -499,6 +556,9 @@
       account: t.account || (acc ? acc.name : '现金'),
       accountId: t.accountId || null,
       date: t.date || nowDate(),
+      // HH:MM，精确到分钟；date 仍只到日，保证按月/按日统计不受影响。
+      // 未显式传 time（undefined）→ 取当前时刻；显式传空串 → 尊重「不记时间」。
+      time: t.time === undefined ? nowTime() : normTime(t.time),
       note: t.note || '',
       splitId: t.splitId || null,
       source: t.source || null, // 'quick' = 快捷指令/快速记账写入
@@ -523,6 +583,7 @@
         patch.rate = round2(rate);
       }
       if ('discount' in patch) patch.discount = patch.discount ? round2(patch.discount) : 0;
+      if ('time' in patch) patch.time = normTime(patch.time);
       if ('accountId' in patch) {
         const acc = patch.accountId ? accountById(patch.accountId) : null;
         patch.account = acc ? acc.name : '现金';
@@ -613,6 +674,7 @@
       account: acc ? acc.name : (parent.account || '现金'),
       accountId: acc ? acc.id : (parent.accountId || null),
       date: r.date || nowDate(),
+      time: r.time === undefined ? nowTime() : normTime(r.time),
       note: r.note || '',
       splitId: null,
       createdAt: Date.now(),
@@ -662,6 +724,7 @@
       accountId: null,
       fromId: t.fromId, toId: t.toId,
       date: t.date || nowDate(),
+      time: t.time === undefined ? nowTime() : normTime(t.time),
       note: t.note || '',
       splitId: null,
       createdAt: Date.now()
@@ -684,6 +747,7 @@
       let toAmount = patch.toAmount != null ? round2(patch.toAmount)
         : (cur.toAmount != null ? cur.toAmount : amount);
       if (toCurrency === currency) { rate = 1; toAmount = amount; }
+      if ('time' in patch) patch.time = normTime(patch.time);
       data.transactions[i] = Object.assign({}, cur, patch, {
         type: 'transfer', category: 'transfer', account: '转账', accountId: null,
         currency, toCurrency, rate: round2(rate), amount, toAmount
@@ -708,6 +772,7 @@
       ledgerId: ledgerId,
       title: s.title || '未命名账单',
       date: s.date || nowDate(),
+      time: s.time === undefined ? nowTime() : normTime(s.time),
       total: round2(s.total),
       paidBy: s.paidBy,
       method: s.method || 'equal',
@@ -782,6 +847,7 @@
       from: c.from, to: c.to,
       amount: round2(c.amount),
       date: c.date || nowDate(),
+      time: c.time === undefined ? nowTime() : normTime(c.time),
       note: c.note || '',
       createdAt: Date.now()
     };
@@ -934,7 +1000,7 @@
     CATS_EXPENSE, CATS_INCOME, ACCOUNTS, CURRENCIES, LEDGER_ICONS, LEDGER_COLORS,
     CAT_EMOJIS, ACCOUNT_ICONS,
     currencyMeta, catMeta, getCategories, addCategory, updateCategory, deleteCategory,
-    uid, nowDate, round2, load, save, ensureSeed, normalize,
+    uid, nowDate, nowTime, normTime, txTime, txSortKey, txDateTime, round2, load, save, ensureSeed, normalize,
     listLedgers, ledgerById, defaultLedger, ledgerForDate,
     addLedger, updateLedger, deleteLedger, setDefaultLedger, setCompanions, belongsToLedger,
     listAccounts, accountById, addAccount, updateAccount, deleteAccount, accountBalance, accountTransactions,
