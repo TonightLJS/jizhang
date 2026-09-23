@@ -94,6 +94,17 @@
     { re: /(后天)/, offset: 2 }
   ];
 
+  // 时段前缀 → 小时修正（12 小时制转 24 小时制）
+  // 注意「今晚/昨晚」这类已被 DAY_WORDS 消费，此处只处理「晚上 / 下午」等纯时段词
+  var PERIOD_WORDS = [
+    { re: /(凌晨)/, map: function (h) { return h === 12 ? 0 : (h < 6 ? h : h); } },
+    { re: /(早上|早晨|清晨|上午|今早|明早)/, map: function (h) { return h === 12 ? 0 : h; } },
+    { re: /(中午|正午)/, map: function (h) { return h < 11 ? 12 : h; } },
+    { re: /(下午|午后)/, map: function (h) { return h < 12 ? h + 12 : h; } },
+    { re: /(傍晚|黄昏)/, map: function (h) { return h < 12 ? h + 12 : h; } },
+    { re: /(晚上|夜里|夜晚|今晚|昨晚|明晚)/, map: function (h) { return h < 12 ? h + 12 : h; } }
+  ];
+
   var CN_NUM = { '零': 0, '〇': 0, '一': 1, '壹': 1, '二': 2, '两': 2, '贰': 2, '三': 3, '叁': 3, '四': 4, '肆': 4, '五': 5, '伍': 5, '六': 6, '陆': 6, '七': 7, '柒': 7, '八': 8, '捌': 8, '九': 9, '玖': 9 };
   var CN_UNIT = { '十': 10, '拾': 10, '百': 100, '佰': 100, '千': 1000, '仟': 1000, '万': 10000, '亿': 100000000 };
   var CN_NUM_ALL = '零〇一壹二两贰三叁四肆五伍六陆七柒八捌九玖十拾百佰千仟万';
@@ -117,6 +128,62 @@
   }
 
   function todayStr() { return shiftDate(0); }
+
+  /** 规整 HH:MM 写法 */
+  function normTimeStr(v) {
+    var m = String(v == null ? '' : v).trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return '';
+    var h = Number(m[1]), mi = Number(m[2]);
+    if (h < 0 || h > 23 || mi < 0 || mi > 59) return '';
+    return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
+  }
+
+  /** 从文本里抽出「几点几分」，返回 { time:'HH:MM', text:去掉时间词的文本 }。
+   *  支持：下午3点半 / 晚上8点 / 14:30 / 9点15分 / 早上7点
+   *  找不到就返回 time:''（表示沿用当前时间）。
+   */
+  function extractTime(text, raw) {
+    var h = null, mi = 0, matched = '';
+
+    // ① 数字冒号写法：14:30 / 9:05
+    var m = text.match(/(?:^|[^\d:])(\d{1,2}):(\d{2})(?!\d)/);
+    if (m) {
+      h = Number(m[1]); mi = Number(m[2]); matched = m[0].replace(/^[^\d]*/, '');
+    }
+
+    // ② 中文「X点X分 / X点半 / X点」
+    if (h === null) {
+      var re = new RegExp('([' + CN_NUM_ALL.replace('万', '') + '0-9]{1,3})\\s*[点时](?:(半)|([0-9' + CN_NUM_ALL.replace('万', '') + ']{1,3})\\s*分?)?');
+      var mm = text.match(re);
+      if (mm) {
+        var hv = cnToNum(mm[1]);
+        if (!isNaN(hv) && hv >= 0 && hv <= 24) {
+          h = hv;
+          if (mm[2]) mi = 30;
+          else if (mm[3]) { var mv = cnToNum(mm[3]); if (!isNaN(mv) && mv >= 0 && mv < 60) mi = mv; }
+          matched = mm[0];
+        }
+      }
+    }
+
+    if (h === null) return { time: '', text: text };
+
+    // ③ 时段修正（要从原文找，因为 text 里可能已去掉日期词）
+    for (var i = 0; i < PERIOD_WORDS.length; i++) {
+      var pm = String(raw).match(PERIOD_WORDS[i].re);
+      if (pm) {
+        h = PERIOD_WORDS[i].map(h);
+        // 把时段词也一并消费掉
+        text = text.replace(pm[0], ' ');
+        break;
+      }
+    }
+
+    if (h > 23) h = h % 24;
+    if (h < 0 || h > 23 || mi < 0 || mi > 59) return { time: '', text: text };
+    var out = String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
+    return { time: out, text: text.replace(matched, ' ') };
+  }
 
   /** 中文数字 → 阿拉伯数字
    *  "三十五"→35  "十五"→15  "两百"→200  "两千三"→2300  "一千二"→1200  "一万二"→12000
@@ -175,15 +242,19 @@
     }
 
     // 0) 预处理
-    //   先保护小数点：中文口语「打车12.5」里的 . 不能被当句读切掉，否则会拆成 12 和 5
-    text = text.replace(/(\d)\s*\.\s*(\d)/g, '$1\u0001$2');
+    //   先保护「小数点」和「时间冒号」：中文口语「打车12.5」「14:30」里的 . 和 :
+    //   都在下面的句读表里，不保护就会被切成两段（12 5 / 14 30）
+    text = text
+      .replace(/(\d)\s*\.\s*(\d)/g, '$1\u0001$2')
+      .replace(/(\d)\s*[:：]\s*(\d{2})(?!\d)/g, '$1\u0002$2');
     text = text
       .replace(/[，。！？、；：,.!?;:]/g, ' ')   // 此处切分句读
       .replace(/[（(]([^）)]*)[）)]/g, ' ')
       .replace(/花了|花掉|一共|总共|共计|合计|大概|差不多|大约|左右|消费了/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-      .replace(/\u0001/g, '.');                 // 还原小数点
+      .replace(/\u0001/g, '.')                  // 还原小数点
+      .replace(/\u0002/g, ':');                 // 还原时间冒号
 
     var consumed = []; // 记录已消费的片段，剩余的作为备注
 
@@ -217,6 +288,16 @@
       for (var ci = 0; ci < CURRENCY_WORDS.length; ci++) {
         if (reTest(CURRENCY_WORDS[ci].re, raw)) { currency = CURRENCY_WORDS[ci].code; break; }
       }
+    }
+
+    /* ---- 1.6) 时间（必须在金额之前！否则「下午3点」的 3 会被当成金额）---- */
+    var timeStr = '';
+    if (opts.time) {
+      timeStr = normTimeStr(opts.time);
+    } else {
+      var ext = extractTime(text, raw);
+      timeStr = ext.time;
+      text = ext.text;
     }
 
     /* ---- 2) 金额 ---- */
@@ -350,6 +431,7 @@
       category: catKey || (st2 ? defaultCat(type) : ''),
       accountName: accName || '',
       date: dateStr,
+      time: timeStr,          // '' 表示用「现在」的时分
       note: note
     };
 
@@ -359,7 +441,7 @@
       tips: tips,
       raw: raw,
       date: dateStr,
-      matched: { amount: amount, type: type, category: catKey, account: accName, currency: currency, note: note }
+      matched: { amount: amount, type: type, category: catKey, account: accName, currency: currency, time: timeStr, note: note }
     };
   }
 
@@ -416,6 +498,7 @@
       category: rec.category || defaultCat(rec.type),
       accountId: acc ? acc.id : null,
       date: rec.date || todayStr(),
+      time: rec.time || (st.nowTime ? st.nowTime() : ''),
       note: rec.note || '',
       source: 'quick'
     };
@@ -486,6 +569,7 @@
           cat: p.cat || '',
           acc: p.acc || '',
           date: p.date || '',
+          time: p.time || '',
           back: p.back === '1' || p.back === 'true'
         });
       }, 180);
