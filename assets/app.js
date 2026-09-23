@@ -361,6 +361,143 @@
     });
   }
 
+  /* ---------------- 快速记账（快捷指令 / Siri / 分享面板） ---------------- */
+  // 面板本体：展示解析结果，允许改类型 / 分类 / 付款方式 / 日期后确认
+  function openQuickPanel(parsed, o) {
+    o = o || {};
+    const st = {
+      type: (parsed.record && parsed.record.type) || 'expense',
+      category: (parsed.record && parsed.record.category) || '',
+      accountId: '',
+      date: (parsed.record && parsed.record.date) || S.nowDate(),
+      amount: (parsed.record && parsed.record.amount) || 0,
+      currency: (parsed.record && parsed.record.currency) || 'CNY',
+      note: (parsed.record && parsed.record.note) || '',
+    };
+    // 账户：按解析出的名字匹配，找不到就用现金
+    const accs = S.listAccounts();
+    const wantName = (parsed.record && parsed.record.accountName) || '';
+    let acc = wantName ? accs.filter((a) => a.name === wantName || a.id === wantName)[0] : null;
+    if (!acc) acc = accs.filter((a) => a.name === '现金')[0] || accs[0];
+    st.accountId = acc ? acc.id : '';
+
+    const cats = () => S.getCategories(st.type === 'income' ? 'income' : 'expense');
+    const catHTML = () => cats().map((c) =>
+      `<div class="cat-cell ${c.key === st.category ? 'active' : ''}" data-cat="${c.key}"><span class="emoji">${c.emoji}</span><span class="name">${c.name}</span></div>`
+    ).join('');
+    const accHTML = () => accs.map((a) =>
+      `<option value="${a.id}" ${a.id === st.accountId ? 'selected' : ''}>${a.icon} ${esc(a.name)}</option>`
+    ).join('');
+
+    openSheet(`
+      <div class="sheet-handle"></div>
+      <div class="quick-head">
+        <span class="quick-badge">⚡ 快速记账</span>
+        ${parsed.raw ? `<div class="quick-raw">「${esc(parsed.raw)}」</div>` : '<div class="quick-raw">手动填一笔</div>'}
+      </div>
+      ${!parsed.ok ? `<div class="quick-warn">${esc((parsed.tips || ['没识别出金额'])[0])}</div>` : ''}
+      ${(parsed.tips || []).filter(() => parsed.ok).map((t) => `<div class="quick-tip">提示：${esc(t)}</div>`).join('')}
+      <div class="seg" id="qfType">
+        <button data-type="expense" class="${st.type === 'expense' ? 'on-expense' : ''}">支出</button>
+        <button data-type="income" class="${st.type === 'income' ? 'on-income' : ''}">收入</button>
+      </div>
+      <div class="field" style="margin-top:14px"><label>金额</label>
+        <input class="input" id="qfAmount" type="number" inputmode="decimal" placeholder="0.00" value="${st.amount ? money(st.amount) : ''}" /></div>
+      <div class="field"><label>分类</label><div class="cat-grid" id="qfCat">${catHTML()}</div></div>
+      <div class="field"><label>付款方式</label><select class="select" id="qfAcc">${accHTML()}</select></div>
+      <div class="field"><label>日期</label><input class="input" id="qfDate" type="date" value="${st.date}" /></div>
+      <div class="field"><label>备注</label><input class="input" id="qfNote" placeholder="可选" value="${esc(st.note)}" /></div>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn secondary" id="qfCancel">取消</button>
+        <button class="btn" id="qfSave">记一笔</button>
+      </div>
+    `, (body) => {
+      on(body, '#qfType button', 'click', (e) => {
+        st.type = e.currentTarget.dataset.type;
+        $$('#qfType button', body).forEach((b) => {
+          b.classList.toggle('on-expense', b.dataset.type === 'expense' && st.type === 'expense');
+          b.classList.toggle('on-income', b.dataset.type === 'income' && st.type === 'income');
+        });
+        st.category = ((cats()[0]) || {}).key || '';
+        $('#qfCat', body).innerHTML = catHTML();
+        bindCatGrid(body, st, '#qfCat');
+      });
+      bindCatGrid(body, st, '#qfCat');
+      $('#qfAcc', body).addEventListener('change', (e) => { st.accountId = e.target.value; });
+      $('#qfCancel', body).addEventListener('click', closeSheet);
+      $('#qfSave', body).addEventListener('click', () => {
+        const amount = parseFloat($('#qfAmount', body).value);
+        if (!amount || amount <= 0) { toast('请输入有效金额'); return; }
+        const tx = S.addTransaction({
+          ledgerId: currentLedgerId,
+          type: st.type,
+          amount,
+          currency: st.currency || 'CNY',
+          rate: 1,
+          discount: 0,
+          category: st.category,
+          accountId: st.accountId || null,
+          date: $('#qfDate', body).value || S.nowDate(),
+          note: ($('#qfNote', body).value || '').trim(),
+          source: 'quick',
+        });
+        closeSheet();
+        toast(`已记录 ${st.type === 'income' ? '+' : '-'}${money(tx.amount)}`);
+        refreshAfterChange();
+      });
+    });
+  }
+
+  // 设置 → 快捷指令说明
+  function openShortcutSheet() {
+    const base = location.origin + location.pathname;
+    const ex = base + '?quick=1&text=' + encodeURIComponent('午饭35') + '&auto=1';
+    openSheet(`
+      <div class="sheet-handle"></div>
+      <div class="section-title">⚡ 用快捷指令记账</div>
+      <div class="muted" style="line-height:1.7;margin-bottom:10px">
+        把下面这条网址存进 iPhone「快捷指令」，以后说一句话、点一下图标就能记账，不用打开 App。
+      </div>
+      <div class="field"><label>识别网址（把 text 换成你要记的话）</label>
+        <textarea class="input" id="scUrl" readonly rows="3" style="font-size:12px">${esc(ex)}</textarea>
+      </div>
+      <div class="btn-row"><button class="btn" id="scCopy">复制网址</button></div>
+      <div class="field" style="margin-top:14px"><label>试试手输一句</label>
+        <input class="input" id="scTry" placeholder="例：昨天打车 12.5 微信" />
+      </div>
+      <div class="btn-row"><button class="btn secondary" id="scGo">识别并记账</button></div>
+      <div class="muted" style="line-height:1.8;margin-top:12px;font-size:13px">
+        <b>几个例子</b><br/>
+        · 午饭35 → 支出 ¥35 · 餐饮<br/>
+        · 打车 12.5 微信 → 支出 ¥12.5 · 交通 · 微信<br/>
+        · 昨天超市120支付宝 → 日期自动昨天<br/>
+        · 工资8000 → 收入 ¥8000 · 工资<br/>
+        · 房租两千三 → 支持中文数字<br/><br/>
+        <b>参数说明</b><br/>
+        · <code>text=</code> 要识别的话（必填）<br/>
+        · <code>auto=1</code> 直接记账不弹窗<br/>
+        · <code>type=income</code> 强制收入<br/>
+        · <code>cat=food</code> 强制分类 · <code>acc=微信</code> 强制付款方式<br/>
+        · <code>date=2026-09-01</code> 指定日期<br/><br/>
+        详细步骤见仓库里的 <b>SHORTCUT.md</b>。
+      </div>
+      <div class="btn-row" style="margin-top:12px"><button class="btn secondary" id="scClose">关闭</button></div>
+    `, (body) => {
+      $('#scClose', body).addEventListener('click', closeSheet);
+      $('#scCopy', body).addEventListener('click', () => {
+        const v = $('#scUrl', body).value;
+        if (navigator.clipboard) navigator.clipboard.writeText(v).then(() => toast('已复制网址'), () => toast('复制失败，请长按选择'));
+        else { $('#scUrl', body).select(); toast('请长按选择复制'); }
+      });
+      $('#scGo', body).addEventListener('click', () => {
+        const t = $('#scTry', body).value.trim();
+        if (!t) { toast('先输入一句话'); return; }
+        closeSheet();
+        openQuickPanel(window.QuickAdd ? window.QuickAdd.parse(t) : { ok: false, tips: ['解析模块未加载'], raw: t }, {});
+      });
+    });
+  }
+
   /* ---------------- 单单操作菜单（编辑 / 退款 / 删除） ---------------- */
   function openTxActions(tx) {
     const isRefund = tx.type === 'refund';
@@ -677,11 +814,12 @@
     });
   }
 
-  function bindCatGrid(body, st) {
-    on(body, '#catGrid .cat-cell', 'click', (e) => {
+  function bindCatGrid(body, st, gridSel) {
+    const grid = gridSel || '#catGrid';
+    on(body, grid + ' .cat-cell', 'click', (e) => {
       const key = e.currentTarget.dataset.cat;
       if (st) st.category = key;
-      $$('#catGrid .cat-cell', body).forEach((c) => c.classList.toggle('active', c.dataset.cat === key));
+      $$(grid + ' .cat-cell', body).forEach((c) => c.classList.toggle('active', c.dataset.cat === key));
     });
   }
 
@@ -1364,6 +1502,10 @@
         <div id="cloudBody"></div>
       </div>
       <div class="card">
+        <div class="section-title">快捷记账</div>
+        <div class="set-item" id="quickEntry">⚡ 快捷指令 <span class="muted">说一句话就记账 ▾</span></div>
+      </div>
+      <div class="card">
         <div class="section-title">账本</div>
         <div class="set-item" id="openMgr">账本管理 <span class="muted">新建 / 编辑 / 删除 ▾</span></div>
       </div>
@@ -1419,6 +1561,7 @@
     renderCatManager($('#catExp'), 'expense');
     renderCatManager($('#catInc'), 'income');
     $('#openMgr').addEventListener('click', openLedgerManager);
+    $('#quickEntry').addEventListener('click', openShortcutSheet);
     $('#exportBtn').addEventListener('click', () => { $('#backupBox').value = S.exportAll(); toast('已生成备份'); });
     $('#copyBtn').addEventListener('click', () => {
       const v = $('#backupBox').value;
@@ -1640,6 +1783,15 @@
     }
     await initCloud();
     go('record');
+    // 交接给快速记账模块：处理 ?quick=1 网址调用与分享面板文本
+    if (window.QuickAdd && window.QuickAdd.boot) {
+      window.QuickAdd.boot({
+        toast: toast,
+        close: closeSheet,
+        refresh: refreshAfterChange,
+        openQuickPanel: openQuickPanel,
+      });
+    }
   }
 
   document.addEventListener('DOMContentLoaded', init);
