@@ -35,6 +35,24 @@
     const wk = ['日', '一', '二', '三', '四', '五', '六'][t.getDay()];
     return `${t.getMonth() + 1}月${t.getDate()}日 周${wk}`;
   }
+  // 日期 + 时间（时间缺失时只显示日期）
+  function fmtDateTime(d, time) {
+    return time ? `${fmtDate(d)} ${time}` : fmtDate(d);
+  }
+  // 明细行右侧的紧凑时间戳（今天显示「今天 14:30」，今年显示「9/23 14:30」）
+  function fmtStamp(date, time) {
+    if (!time) return '';
+    const today = S.nowDate();
+    if (date === today) return time;
+    const parts = String(date || '').split('-');
+    if (parts.length === 3) return `${+parts[1]}/${+parts[2]} ${time}`;
+    return time;
+  }
+  // 明细行尾部的灰色时间戳（无时间则不渲染）
+  function stampHTML(t) {
+    const s = fmtStamp(t.date, S.txTime(t));
+    return s ? ` <span class="tx-time">${esc(s)}</span>` : '';
+  }
   function ledgerChipHTML(led) {
     if (!led) return '';
     return `<div class="ledger-chip" id="ledgerChip">
@@ -297,7 +315,9 @@
     const dates = Object.keys(groups).sort().reverse();
     let html = '';
     dates.forEach((d) => {
-      const list = groups[d];
+      // 同一天内按时间倒序（最新的在最上面，方便回看）
+      const list = groups[d].slice().sort((a, b) =>
+        S.txSortKey(b).localeCompare(S.txSortKey(a)) || ((b.createdAt || 0) - (a.createdAt || 0)));
       // 退款不计入当日支/收小计（退款行本身已作为负数单独展示，避免重复扣减）
       const dayExp = list.filter((t) => t.type === 'expense').reduce((a, t) => a + S.baseAmount(t), 0);
       const dayInc = list.filter((t) => t.type === 'income').reduce((a, t) => a + S.baseAmount(t), 0);
@@ -313,7 +333,7 @@
               <div class="tx-emoji">💸</div>
               <div class="tx-mid">
                 <div class="tx-cat">转账 ${esc(from ? from.name : '?')} → ${esc(to ? to.name : '?')}${cross ? ' · 跨货币' : ''}</div>
-                <div class="tx-note">${esc(t.note || '')}${cross ? ' · ' + esc(t.currency) + '→' + esc(t.toCurrency) : (t.currency ? ' · ' + esc(t.currency) : '')}</div>
+                <div class="tx-note">${esc(t.note || '')}${cross ? ' · ' + esc(t.currency) + '→' + esc(t.toCurrency) : (t.currency ? ' · ' + esc(t.currency) : '')}${stampHTML(t)}</div>
               </div>
               <div class="tx-amt">${fc.sym}${money(t.amount)}<span class="tx-code">${esc(t.currency)}</span>${cross ? ` <span class="muted">→ ${tc.sym}${money(t.toAmount)} ${esc(t.toCurrency)}</span>` : ''}</div>
             </div>`;
@@ -326,7 +346,7 @@
               <div class="tx-emoji">↩️</div>
               <div class="tx-mid">
                 <div class="tx-cat">退款 <span class="pill refund">${t.parentType === 'income' ? '收入退回' : '支出退回'}</span></div>
-                <div class="tx-note">${esc(txAccountName(t))}${t.note ? ' · ' + esc(t.note) : ''} · ${esc(t.currency)}</div>
+                <div class="tx-note">${esc(txAccountName(t))}${t.note ? ' · ' + esc(t.note) : ''} · ${esc(t.currency)}${stampHTML(t)}</div>
               </div>
               <div class="tx-amt refund">-${cm.sym}${money(t.amount)}<span class="tx-code">${esc(t.currency)}</span></div>
             </div>`;
@@ -346,7 +366,7 @@
             <div class="tx-emoji">${meta.emoji}</div>
             <div class="tx-mid">
               <div class="tx-cat">${esc(meta.name)} ${t.splitId ? '<span class="pill">已分账</span>' : ''}${refundPill}</div>
-              <div class="tx-note">${esc(txAccountName(t))}${t.note ? ' · ' + esc(t.note) : ''}${t.currency ? ' · ' + esc(t.currency) : ''}</div>
+              <div class="tx-note">${esc(txAccountName(t))}${t.note ? ' · ' + esc(t.note) : ''}${t.currency ? ' · ' + esc(t.currency) : ''}${stampHTML(t)}</div>
             </div>
             <div class="tx-amt ${cls}">${sign}${cm.sym}${money(t.amount)}<span class="tx-code">${esc(t.currency)}</span></div>
           </div>`;
@@ -370,6 +390,7 @@
       category: (parsed.record && parsed.record.category) || '',
       accountId: '',
       date: (parsed.record && parsed.record.date) || S.nowDate(),
+      time: (parsed.record && parsed.record.time) || S.nowTime(),
       amount: (parsed.record && parsed.record.amount) || 0,
       currency: (parsed.record && parsed.record.currency) || 'CNY',
       note: (parsed.record && parsed.record.note) || '',
@@ -405,7 +426,11 @@
         <input class="input" id="qfAmount" type="number" inputmode="decimal" placeholder="0.00" value="${st.amount ? money(st.amount) : ''}" /></div>
       <div class="field"><label>分类</label><div class="cat-grid" id="qfCat">${catHTML()}</div></div>
       <div class="field"><label>付款方式</label><select class="select" id="qfAcc">${accHTML()}</select></div>
-      <div class="field"><label>日期</label><input class="input" id="qfDate" type="date" value="${st.date}" /></div>
+      <div class="field"><label>日期 / 时间</label>
+        <div class="dt-row">
+          <input class="input" id="qfDate" type="date" value="${st.date}" />
+          <input class="input dt-time" id="qfTime" type="time" value="${st.time || ''}" />
+        </div></div>
       <div class="field"><label>备注</label><input class="input" id="qfNote" placeholder="可选" value="${esc(st.note)}" /></div>
       <div class="btn-row" style="margin-top:14px">
         <button class="btn secondary" id="qfCancel">取消</button>
@@ -438,6 +463,7 @@
           category: st.category,
           accountId: st.accountId || null,
           date: $('#qfDate', body).value || S.nowDate(),
+          time: $('#qfTime', body).value || '',
           note: ($('#qfNote', body).value || '').trim(),
           source: 'quick',
         });
@@ -510,7 +536,7 @@
       <div class="sheet-handle"></div>
       <div class="confirm-box">
         <div class="confirm-title">${esc(kindText)} ${cm.sym}${money(tx.amount)} <span class="muted">${esc(tx.currency || '')}</span></div>
-        <div class="confirm-desc">${esc(tx.date)}${tx.note ? ' · ' + esc(tx.note) : ''}${refunded > 0 ? `<br>已退款 ${cm.sym}${money(refunded)}` : ''}</div>
+        <div class="confirm-desc">${esc(S.txDateTime(tx))}${tx.note ? ' · ' + esc(tx.note) : ''}${refunded > 0 ? `<br>已退款 ${cm.sym}${money(refunded)}` : ''}</div>
       </div>
       <div class="act-list">
         <button class="act-item" id="axEdit"><span>✏️</span><span>编辑</span></button>
@@ -560,7 +586,7 @@
     const already = S.refundedAmount(tx.id);
     const remain = Math.round((total - already) * 100) / 100;
     const accs = S.listAccounts();
-    const st = { mode: remain > 0 ? 'full' : 'part', date: S.nowDate(), note: '', toAccountId: tx.accountId || (accs[0] || {}).id };
+    const st = { mode: remain > 0 ? 'full' : 'part', date: S.nowDate(), time: S.nowTime(), note: '', toAccountId: tx.accountId || (accs[0] || {}).id };
     const isExpense = tx.type === 'expense';
 
     function amountOf(body) {
@@ -579,7 +605,7 @@
     openSheet(`
       <div class="sheet-handle"></div>
       <div class="field"><label>原记录</label>
-        <div class="muted" style="font-size:14px">${esc(S.catMeta(tx.type, tx.category).name)} · ${cm.sym}${money(total)} ${esc(tx.currency)} · ${esc(tx.date)}
+        <div class="muted" style="font-size:14px">${esc(S.catMeta(tx.type, tx.category).name)} · ${cm.sym}${money(total)} ${esc(tx.currency)} · ${esc(S.txDateTime(tx))}
         ${already > 0 ? `<br>已退 ${cm.sym}${money(already)}，本次最多可退 ${cm.sym}${money(remain)}` : ''}</div>
       </div>
       <div class="seg" id="rfMode">
@@ -594,7 +620,11 @@
       <div class="field"><label>退回账户（默认原路退回）</label>
         <select class="select" id="rfAcc">${accs.map((a) => `<option value="${a.id}" ${a.id === st.toAccountId ? 'selected' : ''}>${a.icon} ${esc(a.name)}（${esc(a.currency)}）</option>`).join('')}</select>
       </div>
-      <div class="field"><label>退款日期</label><input class="input" id="rfDate" type="date" value="${st.date}" /></div>
+      <div class="field"><label>退款日期 / 时间</label>
+        <div class="dt-row">
+          <input class="input" id="rfDate" type="date" value="${st.date}" />
+          <input class="input dt-time" id="rfTime" type="time" value="${st.time || ''}" />
+        </div></div>
       <div class="field"><label>备注</label><textarea class="input" id="rfNote" placeholder="可选，如「商家退款」"></textarea></div>
       <div class="btn-row" style="margin-top:14px">
         <button class="btn secondary" id="rfCancel">取消</button>
@@ -618,6 +648,7 @@
         const r = S.addRefund({
           parentId: tx.id, amount,
           date: $('#rfDate', body).value || S.nowDate(),
+          time: $('#rfTime', body).value || '',
           note: $('#rfNote', body).value.trim(),
           toAccountId: st.toAccountId
         });
@@ -643,6 +674,7 @@
       currency: tx ? tx.currency : led.currency,
       rate: tx ? tx.rate : (led.currency === base ? 1 : ''),
       discount: tx ? tx.discount : 0,
+      time: tx ? S.txTime(tx) : S.nowTime(),
       split: { enabled: false, method: 'equal', members: [{ name: SELF }], paidBy: SELF, _prefilled: false }
     };
     const cats = () => S.getCategories(st.type === 'income' ? 'income' : 'expense');
@@ -674,7 +706,11 @@
       <div class="field"><label>优惠（选填，记录省下的）</label>
         <input class="input" id="fDiscount" type="number" inputmode="decimal" placeholder="0.00" value="${tx && tx.discount ? money(tx.discount) : ''}" /></div>
       <div class="field"><label>分类</label><div class="cat-grid" id="catGrid">${catHTML()}</div></div>
-      <div class="field"><label>日期</label><input class="input" id="fDate" type="date" value="${tx ? tx.date : S.nowDate()}" /></div>
+      <div class="field"><label>日期 / 时间</label>
+        <div class="dt-row">
+          <input class="input" id="fDate" type="date" value="${tx ? tx.date : S.nowDate()}" />
+          <input class="input dt-time" id="fTime" type="time" value="${tx ? S.txTime(tx) : S.nowTime()}" />
+        </div></div>
       <div class="field"><label>付款方式</label>
         <select class="select" id="fAccount">${accountOpts(st.accountId)}</select></div>
       <div class="field"><label>备注</label><textarea class="input" id="fNote" placeholder="可选">${tx ? esc(tx.note) : ''}</textarea></div>
@@ -782,6 +818,7 @@
           discount, category: st.category,
           accountId: st.accountId,
           date: $('#fDate', body).value || S.nowDate(),
+          time: $('#fTime', body).value || '',
           note: $('#fNote', body).value.trim()
         };
         let txObj;
@@ -902,6 +939,7 @@
       rate: tx ? (tx.rate != null ? Number(tx.rate) : 1) : 1,
       mode: 'out', // 'out' 填写转出金额；'in' 填写到账金额
       date: tx ? tx.date : S.nowDate(),
+      time: tx ? S.txTime(tx) : S.nowTime(),
       note: tx ? tx.note : ''
     };
     function opts(sel) {
@@ -919,7 +957,11 @@
       <div class="field"><label id="tAmtLabel">转出金额（${st.currency}）</label><input class="input" id="tAmount" type="number" inputmode="decimal" placeholder="0.00" value="${st.amount != null ? money(st.amount) : ''}" /></div>
       <div class="field" id="tRateField" ${isCross() ? '' : 'hidden'}><label id="tRateLabel">汇率（1 ${st.currency} = ? ${st.toCurrency}）</label><input class="input" id="tRate" type="number" inputmode="decimal" placeholder="如 20" value="${isCross() && st.rate !== 1 ? st.rate : ''}" /></div>
       <div class="muted" id="tPreview" style="margin:-4px 0 8px"></div>
-      <div class="field"><label>日期</label><input class="input" id="tDate" type="date" value="${st.date}" /></div>
+      <div class="field"><label>日期 / 时间</label>
+        <div class="dt-row">
+          <input class="input" id="tDate" type="date" value="${st.date}" />
+          <input class="input dt-time" id="tTime" type="time" value="${st.time || ''}" />
+        </div></div>
       <div class="field"><label>备注</label><textarea class="input" id="tNote" placeholder="可选">${tx ? esc(tx.note) : ''}</textarea></div>
       <div class="btn-row" style="margin-top:14px">
         <button class="btn secondary" id="tCancel">取消</button>
@@ -1007,7 +1049,8 @@
           toAmount: st.toAmount != null ? st.toAmount : (st.amount != null ? st.amount : 0),
           currency: st.currency, toCurrency: st.toCurrency,
           rate: cross ? st.rate : 1,
-          date: $('#tDate', body).value || S.nowDate(), note: $('#tNote', body).value.trim()
+          date: $('#tDate', body).value || S.nowDate(), time: $('#tTime', body).value || '',
+          note: $('#tNote', body).value.trim()
         };
         if (st.editId) { S.updateTransfer(st.editId, payload); toast('已保存'); }
         else { S.addTransfer(payload); toast('转账成功'); }
@@ -1112,7 +1155,7 @@
               <span class="split-title">${esc(sp.title)} ${sp.linkedTx ? '<span class="pill">已记账</span>' : ''}</span>
               <span><span class="pill">${fmtMoney(sp.total, sp.baseCurrency)}</span><span class="pill paid">${esc(sp.paidBy)}付</span></span>
             </div>
-            <div class="muted" style="margin:4px 0 6px">${fmtDate(sp.date)} · ${sp.method === 'equal' ? '均摊' : sp.method === 'share' ? '按比例' : '精确'}${sp.note ? ' · ' + esc(sp.note) : ''}</div>
+            <div class="muted" style="margin:4px 0 6px">${fmtDateTime(sp.date, S.txTime(sp))} · ${sp.method === 'equal' ? '均摊' : sp.method === 'share' ? '按比例' : '精确'}${sp.note ? ' · ' + esc(sp.note) : ''}</div>
             ${rows}
             <div class="btn-row" style="margin-top:10px">
               <button class="btn secondary" data-edit="${sp.id}" style="padding:8px">编辑</button>
@@ -1381,7 +1424,7 @@
             <div class="tx-emoji">💸</div>
             <div class="tx-mid">
               <div class="tx-cat">转账 ${arrow} ${esc(other ? other.name : '?')}${cross ? ' · 跨货币' : ''}</div>
-              <div class="tx-note">${fmtDate(t.date)}${t.note ? ' · ' + esc(t.note) : ''}</div>
+              <div class="tx-note">${fmtDateTime(t.date, S.txTime(t))}${t.note ? ' · ' + esc(t.note) : ''}</div>
             </div>
             <div class="tx-amt ${cls}">${sign}${dm.sym}${money(it.displayAmount)}<span class="tx-code">${esc(it.displayCurrency)}</span></div>
           </div>
@@ -1395,7 +1438,7 @@
             <div class="tx-emoji">↩️</div>
             <div class="tx-mid">
               <div class="tx-cat">退款 <span class="pill refund">${t.parentType === 'income' ? '收入退回' : '支出退回'}</span></div>
-              <div class="tx-note">${fmtDate(t.date)}${t.note ? ' · ' + esc(t.note) : ''}</div>
+              <div class="tx-note">${fmtDateTime(t.date, S.txTime(t))}${t.note ? ' · ' + esc(t.note) : ''}</div>
             </div>
             <div class="tx-amt refund">${dir}${dc.sym}${money(it.displayAmount)}<span class="tx-code">${esc(it.displayCurrency)}</span></div>
           </div>
