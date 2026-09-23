@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="随手记账" />
+  <meta name="theme-color" content="#34c759" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icon.png" />
+  <link rel="icon" href="icon.png" />
+  <link rel="stylesheet" href="assets/styles.css" />
+  <title>随手记账</title>
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部标题栏 -->
+    <header class="app-header" id="appHeader">
+      <div class="header-title" id="headerTitle">记账</div>
+      <div class="cloud-dot" id="cloudDot" title="云端同步">☁︎</div>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="app-main" id="appMain">
+      <!-- 各视图由 JS 动态渲染 -->
+    </main>
+
+    <!-- 底部 Tab 栏 -->
+    <nav class="tab-bar" id="tabBar">
+      <button class="tab-item" data-view="record" data-label="记账">
+        <span class="tab-icon">📝</span><span class="tab-text">记账</span>
+      </button>
+      <button class="tab-item" data-view="split" data-label="分账">
+        <span class="tab-icon">🤝</span><span class="tab-text">分账</span>
+      </button>
+      <button class="tab-item tab-add" data-view="add" data-label="记一笔">
+        <span class="tab-add-btn">＋</span>
+      </button>
+      <button class="tab-item" data-view="stats" data-label="统计">
+        <span class="tab-icon">📊</span><span class="tab-text">统计</span>
+      </button>
+      <button class="tab-item" data-view="me" data-label="我的">
+        <span class="tab-icon">⚙️</span><span class="tab-text">我的</span>
+      </button>
+    </nav>
+
+    <!-- 记账弹窗（底部抽屉） -->
+    <div class="sheet-mask" id="sheetMask" hidden></div>
+    <div class="sheet" id="recordSheet" hidden>
+      <div class="sheet-handle"></div>
+      <div class="sheet-body" id="sheetBody"><!-- 动态内容 --></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="assets/config.js"></script>
+  <script src="assets/sync.js"></script>
+  <script src="assets/store.js"></script>
+  <script src="assets/charts.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

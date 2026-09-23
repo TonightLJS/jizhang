@@ -1,0 +1,5 @@
+# 忽略本地/临时文件（不影响记账 App 运行）
+.workbuddy/
+*.log
+.DS_Store
+Thumbs.db
