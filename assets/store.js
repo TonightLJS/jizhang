@@ -501,6 +501,8 @@
       date: t.date || nowDate(),
       note: t.note || '',
       splitId: t.splitId || null,
+      source: t.source || null, // 'quick' = 快捷指令/快速记账写入
+      updatedAt: Date.now(),
       createdAt: Date.now()
     };
     data.transactions.unshift(tx);
