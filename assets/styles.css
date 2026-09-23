@@ -308,3 +308,17 @@ textarea.input { resize: none; min-height: 70px; }
 .cloud-dot.spin { animation: spinsync 1s linear infinite; }
 @keyframes spinsync { to { transform: translateY(-50%) rotate(360deg); } }
 
+
+/* ===== 快速记账（快捷指令）面板 ===== */
+.quick-head { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.quick-badge {
+  align-self: flex-start; background: #e8f7ec; color: #1a7f37;
+  border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 600;
+}
+.quick-raw { font-size: 15px; color: var(--text); line-height: 1.5; word-break: break-all; }
+.quick-warn {
+  background: #fff4e5; color: #b26a00; border-radius: 10px;
+  padding: 8px 12px; font-size: 13px; margin-bottom: 8px;
+}
+.quick-tip { color: #8a8f98; font-size: 12px; margin-bottom: 6px; }
+#scUrl { font-family: ui-monospace, Menlo, monospace; }
