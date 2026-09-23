@@ -105,9 +105,13 @@
   }
 
   // ---- 合并：按 id 并集，冲突取 updatedAt 较新者 ----
+  // 墓碑（deleted:true）与普通记录同等参与「取较新」比较：
+  //   · 一台设备删除了某条 → 它带走更新的 updatedAt，合并后仍为「已删除」，删除得以传播，旧副本不会复活
+  //   · 若另一台设备在删除后又编辑过同一条（updatedAt 更新且未标删除），则编辑胜出（复活）
+  function updatedAtOf(x) { return x.updatedAt || x.deletedAt || x.createdAt || 0; }
   function touch(arr) {
     return (arr || []).map(function (x) {
-      return Object.assign({}, x, { updatedAt: x.updatedAt || x.createdAt || 0 });
+      return Object.assign({}, x, { updatedAt: updatedAtOf(x) });
     });
   }
   function mergeArray(localArr, cloudArr) {
