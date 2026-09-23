@@ -1,5 +1,5 @@
 // 随手记账 —— Service Worker（离线缓存）
-const CACHE = 'ledger-v4';
+const CACHE = 'ledger-v5';
 const ASSETS = [
   './',
   './index.html',
