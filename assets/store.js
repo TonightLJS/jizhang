@@ -143,8 +143,23 @@
   function _hub() {
     return (typeof window !== 'undefined' && window.SyncHub) ? window.SyncHub : null;
   }
+  // 墓碑（已删除）记录：跨设备同步靠它传播删除，但不参与任何统计/余额计算
+  function isDeleted(x) { return !!(x && x.deleted); }
+  // 账本/账户/交易/分账的「有效」集合（过滤墓碑），统一入口
+  function alive(arr) { return (arr || []).filter((x) => !isDeleted(x)); }
   // 只落盘、不触发同步（供内部同步流程使用，避免递归）
   function _persist(data) { localStorage.setItem(KEY, JSON.stringify(data)); }
+  // 上传云端时剔除墓碑记录：本地已删的项无需再同步到其他设备
+  // （墓碑在本地保留用于覆盖云端旧副本；每次上传的体积也因此不膨胀）
+  function _stripDeleted(data) {
+    return Object.assign({}, data, {
+      transactions: alive(data.transactions),
+      splits: alive(data.splits),
+      ledgers: alive(data.ledgers),
+      accounts: alive(data.accounts),
+      clears: alive(data.clears)
+    });
+  }
   function save(data) {
     _persist(data);
     if (!_syncing) _scheduleSync();
@@ -168,7 +183,7 @@
       } else {
         toPush = load();                  // 云端为空 → 以本地作为初始数据
       }
-      const r = await h.push(toPush);
+      const r = await h.push(_stripDeleted(toPush));
       if (r.error) { _notifySync('error', r.error); return r; }
       h.markSynced(r.updated_at);
       _notifySync('synced');
@@ -204,7 +219,7 @@
       if (res.error) { _notifySync('error', res.error); return res; }
       if (!res.data) {
         // 云端尚无数据 → 上传本地作为初始数据
-        const r = await h.push(load());
+        const r = await h.push(_stripDeleted(load()));
         if (r.error) { _notifySync('error', r.error); return r; }
         h.markSynced(r.updated_at); _notifySync('synced');
         return { ok: true, updated_at: r.updated_at };
@@ -274,8 +289,8 @@
   /* ---------------- 账本 ---------------- */
   function listLedgers() {
     const data = load();
-    if (!data.ledgers.length) ensureSeed();
-    return load().ledgers;
+    if (!alive(data.ledgers).length) ensureSeed();
+    return alive(load().ledgers);
   }
   function ledgerById(id) {
     return listLedgers().find((l) => l.id === id) || null;
@@ -334,7 +349,9 @@
     if (led && led.isDefault) return false; // 不允许删默认
     const def = defaultLedger();
     data.transactions.forEach((t) => { if (t.ledgerId === id && def) t.ledgerId = def.id; });
-    data.ledgers = data.ledgers.filter((l) => l.id !== id);
+    // 打墓碑（而非硬删），使删除也能同步到其它设备
+    data.ledgers = data.ledgers.map((l) => l.id === id
+      ? Object.assign({}, l, { deleted: true, deletedAt: Date.now(), updatedAt: Date.now() }) : l);
     save(data);
     return true;
   }
@@ -369,10 +386,10 @@
   }
   // 付款方式全局通用：返回全部账户（不再按账本过滤）
   function listAccounts() {
-    return load().accounts.slice();
+    return alive(load().accounts);
   }
   function accountById(id) {
-    return load().accounts.find((a) => a.id === id) || null;
+    return alive(load().accounts).find((a) => a.id === id) || null;
   }
   function addAccount(a) {
     const data = load();
@@ -401,7 +418,7 @@
   function deleteAccount(id) {
     const data = load();
     // 有流水（含作为转账的转出/转入方）不可删
-    if (data.transactions.some((t) =>
+    if (alive(data.transactions).some((t) =>
       t.accountId === id || (t.type === 'transfer' && (t.fromId === id || t.toId === id)))) return false;
     data.accounts = data.accounts.filter((x) => x.id !== id);
     save(data);
@@ -410,16 +427,18 @@
   // 单笔交易对某个账户余额的影响额（按该账户自身货币计）：
   // 交易货币与账户货币一致时直接用面值；否则回退到基准货币价值，避免单位错配。
   function legAmount(t, accCur) {
-    if (t.currency === accCur) return Number(t.amount) || 0;
-    return baseAmount(t);
+    const mag = t.currency === accCur ? (Number(t.amount) || 0) : baseAmount(t);
+    if (t.type === 'refund') return (t.parentType === 'expense' ? 1 : -1) * mag;
+    if (t.type === 'income') return mag;
+    return -mag; // expense
   }
-  // 当前余额 = 初始余额 + 收入 − 支出 ± 转账（按各账户自身货币计）
+  // 当前余额 = 初始余额 + 收入 − 支出 ± 转账/退款（按各账户自身货币计）
   function accountBalance(id) {
     const data = load();
     const acc = data.accounts.find((a) => a.id === id);
     if (!acc) return { initialBalance: 0, balance: 0, currency: 'CNY' };
     let bal = acc.initialBalance || 0;
-    data.transactions.forEach((t) => {
+    alive(data.transactions).forEach((t) => {
       if (t.type === 'transfer') {
         // 跨货币转账：转出方按源货币面值扣减，转入方按目标货币面值增加
         if (t.fromId === id) bal -= (Number(t.amount) || 0);
@@ -427,7 +446,7 @@
         return;
       }
       if (t.accountId !== id) return;
-      bal += (t.type === 'income' ? 1 : -1) * legAmount(t, acc.currency);
+      bal += legAmount(t, acc.currency);
     });
     return { initialBalance: round2(acc.initialBalance || 0), balance: round2(bal), currency: acc.currency };
   }
@@ -435,7 +454,7 @@
   function accountTransactions(id) {
     const data = load();
     const acc = data.accounts.find((a) => a.id === id);
-    const txs = data.transactions.filter((t) =>
+    const txs = alive(data.transactions).filter((t) =>
       t.accountId === id || (t.type === 'transfer' && (t.fromId === id || t.toId === id))).slice()
       .sort((a, b) => a.date.localeCompare(b.date) || ((a.createdAt || 0) - (b.createdAt || 0)));
     let cur = acc ? (acc.initialBalance || 0) : 0;
@@ -455,8 +474,8 @@
           displayAmount: amt, displayCurrency: curCode
         };
       }
-      cur += (t.type === 'income' ? 1 : -1) * legAmount(t, acc.currency);
-      return { tx: t, after: round2(cur) };
+      cur += legAmount(t, acc.currency);
+      return { tx: t, after: round2(cur), displayAmount: Math.abs(Number(t.amount) || 0), displayCurrency: t.currency };
     });
     items.reverse();
     return { account: acc, initialBalance: acc ? round2(acc.initialBalance || 0) : 0, items };
@@ -513,15 +532,103 @@
     return data.transactions[i];
   }
 
-  function deleteTransaction(id) {
+  // 删除 = 打墓碑（deleted:true）。本地立即从统计/余额/列表中消失；
+  // 同时保留墓碑用于在同步时覆盖云端旧副本，从而让「删除」也能传播到其它设备。
+  function deleteTransaction(id, opts) {
+    const data = load();
+    const i = data.transactions.findIndex((x) => x.id === id);
+    if (i < 0) return false;
+    const keepRefunds = !!(opts && opts.keepRefunds);
+    // 原单删除时，连同它的退款一起去掉（否则退款会变成悬空记录）。
+    // keepRefunds=true 用于「退全款后清理原单」：此时要保留已生成的退款。
+    if (!keepRefunds) {
+      data.transactions = data.transactions.filter((x) => !(x.parentId === id && !isDeleted(x)));
+    }
+    // 重新定位（过滤后下标可能已变）
+    const j = data.transactions.findIndex((x) => x.id === id);
+    data.transactions[j] = Object.assign({}, data.transactions[j], {
+      deleted: true, deletedAt: Date.now(), updatedAt: Date.now()
+    });
+    save(data);
+    return true;
+  }
+
+  // ---------------- 退款（全退 / 部分退款） ----------------
+  // 退款以「派生交易」建模：type='refund'，parentId 指向被退的原单。
+  // 净额(基准货币) = -退款额 × 汇率；等同于把该笔收支按退款金额冲销。
+  // 退款方向与原单相反：原支出退回 → 账户余额增加；原收入退回 → 账户余额减少。
+  function refundedAmount(parentId) {
+    return round2(load().transactions
+      .filter((t) => !isDeleted(t) && t.type === 'refund' && t.parentId === parentId)
+      .reduce((a, t) => a + (Number(t.amount) || 0), 0));
+  }
+  function refundChildren(parentId) {
+    return alive(load().transactions.filter((t) => t.type === 'refund' && t.parentId === parentId));
+  }
+  function canRefund(parentTx) {
+    return !!parentTx && !isDeleted(parentTx) && (parentTx.type === 'expense' || parentTx.type === 'income');
+  }
+  // 撤销某笔退款（直接移除；退款不可「删除」，只能撤销）
+  function removeRefund(id) {
     const data = load();
     const tx = data.transactions.find((x) => x.id === id);
-    if (tx && tx.splitId) {
-      const sp = data.splits.find((s) => s.id === tx.splitId);
-      if (sp) sp.linkedTx = null;
-    }
+    if (!tx || tx.type !== 'refund') return false;
     data.transactions = data.transactions.filter((x) => x.id !== id);
     save(data);
+    return true;
+  }
+  // r = { parentId, amount, date, note, toAccountId?, deleteParent? }
+  //   amount：退款金额（与原单同币种）
+  //   deleteParent：退全款时可选「同时删除原单」（保留退款以维持收支平衡）
+  function addRefund(r) {
+    const data = load();
+    const parent = data.transactions.find((x) => x.id === r.parentId);
+    if (!parent) return { error: '原交易不存在' };
+    if (isDeleted(parent)) return { error: '原交易已删除' };
+    if (!(parent.type === 'expense' || parent.type === 'income')) return { error: '该记录不支持退款' };
+    const amount = round2(Number(r.amount));
+    if (!(amount > 0)) return { error: '退款金额无效' };
+    const already = round2(data.transactions
+      .filter((t) => !isDeleted(t) && t.type === 'refund' && t.parentId === parent.id)
+      .reduce((a, t) => a + (Number(t.amount) || 0), 0));
+    const remain = round2(Number(parent.amount) - already);
+    if (amount > remain + 0.005) return { error: `超出可退金额（剩余 ${remain} ${parent.currency}）` };
+
+    // 退款退回哪个账户：默认原路退回（原单账户）；也可指定其它账户
+    const toAcc = r.toAccountId ? accountById(r.toAccountId) : (parent.accountId ? accountById(parent.accountId) : null);
+    const acc = toAcc || null;
+    const tx = {
+      id: uid(),
+      ledgerId: parent.ledgerId,
+      type: 'refund',
+      parentId: parent.id,
+      parentType: parent.type,       // 'expense' | 'income'：决定统计与余额方向
+      amount,
+      currency: parent.currency,
+      rate: parent.rate || 1,
+      discount: 0,
+      category: parent.category,
+      account: acc ? acc.name : (parent.account || '现金'),
+      accountId: acc ? acc.id : (parent.accountId || null),
+      date: r.date || nowDate(),
+      note: r.note || '',
+      splitId: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    data.transactions.unshift(tx);
+    save(data);
+
+    let parentDeleted = false;
+    if (r.deleteParent) {
+      // 退全款 + 删除原单：原单打墓碑的同时保留退款（合起来净额为 0，与原单存在时等价）
+      const full = round2(already + amount);
+      if (full >= round2(Number(parent.amount)) - 0.005) {
+        deleteTransaction(parent.id, { keepRefunds: true });
+        parentDeleted = true;
+      }
+    }
+    return { tx, parentDeleted };
   }
 
   function getTransaction(id) {
@@ -690,13 +797,13 @@
   function allBalances(ledgerId) {
     const data = load();
     const net = {};
-    data.splits.forEach((sp) => {
+    alive(data.splits).forEach((sp) => {
       if (ledgerId && sp.ledgerId !== ledgerId) return;
       const owes = splitOwes(sp);
       Object.keys(owes).forEach((n) => { net[n] = (net[n] || 0) - owes[n]; });
       if (sp.paidBy) net[sp.paidBy] = (net[sp.paidBy] || 0) + sp.total;
     });
-    data.clears.forEach((c) => {
+    alive(data.clears).forEach((c) => {
       if (ledgerId && c.ledgerId !== ledgerId) return;
       net[c.from] = (net[c.from] || 0) + c.amount; // 付钱者债务减少
       net[c.to] = (net[c.to] || 0) - c.amount;       // 收钱者应收减少
@@ -731,7 +838,7 @@
   /* ---------------- 统计（按账本/基准货币） ---------------- */
   function monthRange(ledgerId, month) {
     const data = load();
-    const txs = data.transactions.filter(
+    const txs = alive(data.transactions).filter(
       (t) => belongsToLedger(t, ledgerId) && (t.date || '').slice(0, 7) === month
     );
     let income = 0, expense = 0, discount = 0;
@@ -739,6 +846,17 @@
     txs.forEach((t) => {
       if (t.type === 'transfer') return; // 转账不计入账本收支
       const b = baseAmount(t);
+      if (t.type === 'refund') {
+        // 退款冲销原单：原支出退回 → 减少支出；原收入退回 → 减少收入
+        if (t.parentType === 'income') income -= b;
+        else {
+          expense -= b;
+          const meta = catMeta('expense', t.category);
+          byCat[t.category] = byCat[t.category] || { name: meta.name, emoji: meta.emoji, amount: 0 };
+          byCat[t.category].amount -= b;
+        }
+        return;
+      }
       if (t.type === 'income') income += b;
       else {
         expense += b;
@@ -758,14 +876,18 @@
   function monthlyTrend(ledgerId, months) {
     const data = load();
     const map = {};
-    data.transactions.forEach((t) => {
+    alive(data.transactions).forEach((t) => {
       if (!belongsToLedger(t, ledgerId)) return;
       if (t.type === 'transfer') return; // 转账不计入趋势
       const m = (t.date || '').slice(0, 7);
       if (!m) return;
       map[m] = map[m] || { income: 0, expense: 0 };
-      if (t.type === 'income') map[m].income += baseAmount(t);
-      else map[m].expense += baseAmount(t);
+      const b = baseAmount(t);
+      if (t.type === 'refund') {
+        if (t.parentType === 'income') map[m].income -= b;
+        else map[m].expense -= b;
+      } else if (t.type === 'income') map[m].income += b;
+      else map[m].expense += b;
     });
     const keys = Object.keys(map).sort();
     return keys.slice(-(months || 6)).map((m) => ({
@@ -775,15 +897,16 @@
     }));
   }
 
-  // 账本预算使用：若有起止日期则按范围，否则按该账本全部交易
+  // 账本预算使用：若有起止日期则按范围，否则按该账本全部交易（退款冲减支出）
   function ledgerSpend(ledgerId) {
     const data = load();
     const led = ledgerById(ledgerId);
-    let txs = data.transactions.filter((t) => belongsToLedger(t, ledgerId) && t.type === 'expense');
+    let txs = alive(data.transactions).filter((t) => belongsToLedger(t, ledgerId) &&
+      (t.type === 'expense' || (t.type === 'refund' && t.parentType === 'expense')));
     if (led && led.startDate && led.endDate) {
       txs = txs.filter((t) => t.date >= led.startDate && t.date <= led.endDate);
     }
-    const spent = round2(txs.reduce((a, t) => a + baseAmount(t), 0));
+    const spent = round2(txs.reduce((a, t) => a + (t.type === 'refund' ? -baseAmount(t) : baseAmount(t)), 0));
     return { spent, budget: led ? led.budget : null, ledger: led };
   }
 
@@ -814,6 +937,7 @@
     addLedger, updateLedger, deleteLedger, setDefaultLedger, setCompanions, belongsToLedger,
     listAccounts, accountById, addAccount, updateAccount, deleteAccount, accountBalance, accountTransactions,
     addTransaction, updateTransaction, deleteTransaction, getTransaction,
+    addRefund, removeRefund, refundedAmount, refundChildren, canRefund, isDeleted,
     addTransfer, updateTransfer,
     baseAmount, baseDiscount, legAmount,
     addSplit, updateSplit, deleteSplit,
