@@ -70,6 +70,23 @@
     $('#sheetMask').hidden = true;
     $('#recordSheet').hidden = true;
   }
+  // 二次确认抽屉（比 window.confirm 更适配 iOS，且可自定义按钮文案）
+  function confirmSheet(opts, onYes) {
+    openSheet(`
+      <div class="sheet-handle"></div>
+      <div class="confirm-box">
+        <div class="confirm-title">${esc(opts.title || '确认操作')}</div>
+        ${opts.desc ? `<div class="confirm-desc">${opts.desc}</div>` : ''}
+      </div>
+      <div class="btn-row" style="margin-top:16px">
+        <button class="btn secondary" id="cfNo">${esc(opts.cancelText || '取消')}</button>
+        <button class="btn ${opts.danger ? 'danger' : ''}" id="cfYes">${esc(opts.okText || '确定')}</button>
+      </div>
+    `, (body) => {
+      $('#cfNo', body).addEventListener('click', closeSheet);
+      $('#cfYes', body).addEventListener('click', () => { closeSheet(); onYes(); });
+    });
+  }
 
   /* ---------------- 路由 ---------------- */
   function go(view) {
@@ -133,9 +150,10 @@
         on(list, '[data-edit]', 'click', (e) => { closeSheet(); openLedgerEditor(e.currentTarget.dataset.edit); });
         on(list, '[data-del]', 'click', (e) => {
           const id = e.currentTarget.dataset.del;
-          if (!confirm('删除该账本？其下交易会移回默认账本。')) return;
-          if (S.deleteLedger(id)) { toast('已删除'); if (currentLedgerId === id) currentLedgerId = S.defaultLedger().id; draw(); }
-          else toast('默认账本不可删');
+          confirmSheet({ title: '删除该账本？', desc: '其下交易会移回默认账本。', okText: '删除', danger: true }, () => {
+            if (S.deleteLedger(id)) { toast('已删除'); if (currentLedgerId === id) currentLedgerId = S.defaultLedger().id; draw(); }
+            else toast('默认账本不可删');
+          });
         });
         $('#mgrNew', body).addEventListener('click', () => { closeSheet(); openLedgerEditor(null); });
       });
@@ -265,7 +283,7 @@
       openLedgerPicker((id) => { currentLedgerId = id; renderRecord($('#appMain')); })
     );
     $('#transferBtn').addEventListener('click', () => openTransferSheet(null));
-    renderTxList($('#txList'), S.load().transactions.filter((t) => S.belongsToLedger(t, led.id)));
+    renderTxList($('#txList'), S.load().transactions.filter((t) => !S.isDeleted(t) && S.belongsToLedger(t, led.id)));
   }
 
   function renderTxList(box, txs) {
@@ -280,6 +298,7 @@
     let html = '';
     dates.forEach((d) => {
       const list = groups[d];
+      // 退款不计入当日支/收小计（退款行本身已作为负数单独展示，避免重复扣减）
       const dayExp = list.filter((t) => t.type === 'expense').reduce((a, t) => a + S.baseAmount(t), 0);
       const dayInc = list.filter((t) => t.type === 'income').reduce((a, t) => a + S.baseAmount(t), 0);
       html += `<div class="tx-date-head"><span>${fmtDate(d)}</span><span>支 ${fmtMoney(dayExp, base)} · 收 ${fmtMoney(dayInc, base)}</span></div>`;
@@ -300,14 +319,33 @@
             </div>`;
           return;
         }
+        // 退款行：显示为 ↩️ 负数
+        if (t.type === 'refund') {
+          html += `
+            <div class="tx-item" data-id="${t.id}">
+              <div class="tx-emoji">↩️</div>
+              <div class="tx-mid">
+                <div class="tx-cat">退款 <span class="pill refund">${t.parentType === 'income' ? '收入退回' : '支出退回'}</span></div>
+                <div class="tx-note">${esc(txAccountName(t))}${t.note ? ' · ' + esc(t.note) : ''} · ${esc(t.currency)}</div>
+              </div>
+              <div class="tx-amt refund">-${cm.sym}${money(t.amount)}<span class="tx-code">${esc(t.currency)}</span></div>
+            </div>`;
+          return;
+        }
         const meta = S.catMeta(t.type, t.category);
         const sign = t.type === 'income' ? '+' : '-';
         const cls = t.type === 'income' ? 'inc' : 'exp';
+        const refunded = S.refundedAmount(t.id);
+        let refundPill = '';
+        if (refunded > 0) {
+          const full = refunded >= (Number(t.amount) - 0.005);
+          refundPill = `<span class="pill ${full ? 'refund' : 'refund-part'}">${full ? '已退款' : `已退 ${cm.sym}${money(refunded)}`}</span>`;
+        }
         html += `
           <div class="tx-item" data-id="${t.id}">
             <div class="tx-emoji">${meta.emoji}</div>
             <div class="tx-mid">
-              <div class="tx-cat">${esc(meta.name)} ${t.splitId ? '<span class="pill">已分账</span>' : ''}</div>
+              <div class="tx-cat">${esc(meta.name)} ${t.splitId ? '<span class="pill">已分账</span>' : ''}${refundPill}</div>
               <div class="tx-note">${esc(txAccountName(t))}${t.note ? ' · ' + esc(t.note) : ''}${t.currency ? ' · ' + esc(t.currency) : ''}</div>
             </div>
             <div class="tx-amt ${cls}">${sign}${cm.sym}${money(t.amount)}<span class="tx-code">${esc(t.currency)}</span></div>
@@ -319,8 +357,138 @@
       const id = e.currentTarget.dataset.id;
       const tx = S.getTransaction(id);
       if (!tx) return;
-      if (tx.type === 'transfer') openTransferSheet(tx);
-      else openRecordSheet(tx);
+      openTxActions(tx);
+    });
+  }
+
+  /* ---------------- 单单操作菜单（编辑 / 退款 / 删除） ---------------- */
+  function openTxActions(tx) {
+    const isRefund = tx.type === 'refund';
+    const isTransfer = tx.type === 'transfer';
+    const canRefund = S.canRefund(tx);
+    const refunded = canRefund ? S.refundedAmount(tx.id) : 0;
+    const cm = S.currencyMeta(tx.currency);
+    const kindText = isTransfer ? '转账' : (isRefund ? '退款' : (tx.type === 'income' ? '收入' : '支出'));
+    openSheet(`
+      <div class="sheet-handle"></div>
+      <div class="confirm-box">
+        <div class="confirm-title">${esc(kindText)} ${cm.sym}${money(tx.amount)} <span class="muted">${esc(tx.currency || '')}</span></div>
+        <div class="confirm-desc">${esc(tx.date)}${tx.note ? ' · ' + esc(tx.note) : ''}${refunded > 0 ? `<br>已退款 ${cm.sym}${money(refunded)}` : ''}</div>
+      </div>
+      <div class="act-list">
+        <button class="act-item" id="axEdit"><span>✏️</span><span>编辑</span></button>
+        ${canRefund ? `<button class="act-item" id="axRefund"><span>↩️</span><span>退款（全退 / 部分）</span></button>` : ''}
+        ${isRefund ? `<button class="act-item danger" id="axVoid"><span>🗑️</span><span>撤销此退款</span></button>` : `<button class="act-item danger" id="axDel"><span>🗑️</span><span>删除</span></button>`}
+      </div>
+      <div class="btn-row" style="margin-top:12px"><button class="btn secondary" id="axCancel">取消</button></div>
+    `, (body) => {
+      $('#axCancel', body).addEventListener('click', closeSheet);
+      $('#axEdit', body).addEventListener('click', () => { closeSheet(); isTransfer ? openTransferSheet(tx) : openRecordSheet(tx); });
+      const rf = $('#axRefund', body);
+      if (rf) rf.addEventListener('click', () => { closeSheet(); openRefundSheet(tx); });
+      const del = $('#axDel', body);
+      if (del) del.addEventListener('click', () => {
+        closeSheet();
+        const extra = S.refundChildren(tx.id).length ? '<br>该记录已有退款，删除后退款也会一并移除。' : '';
+        confirmSheet({ title: '删除这条记录？', desc: `删除后账本收支与账户余额会相应恢复。<br>（删除会同步到你的其它设备）${extra}`, okText: '删除', danger: true }, () => {
+          S.deleteTransaction(tx.id);
+          toast('已删除');
+          refreshAfterChange();
+        });
+      });
+      const vd = $('#axVoid', body);
+      if (vd) vd.addEventListener('click', () => {
+        closeSheet();
+        confirmSheet({ title: '撤销这笔退款？', desc: '撤销后该笔退款金额会重新计回原记录。', okText: '撤销退款', danger: true }, () => {
+          S.removeRefund(tx.id);
+          toast('已撤销退款');
+          refreshAfterChange();
+        });
+      });
+    });
+  }
+
+  // 按当前视图就地刷新
+  function refreshAfterChange() {
+    if (currentView === 'record') renderRecord($('#appMain'));
+    else if (currentView === 'stats') renderStats($('#appMain'));
+    else if (currentView === 'me') renderMe($('#appMain'));
+    else if (currentView === 'split') renderSplit($('#appMain'));
+  }
+
+  /* ---------------- 退款抽屉（全退 / 部分退款） ---------------- */
+  function openRefundSheet(tx) {
+    const cm = S.currencyMeta(tx.currency);
+    const total = Number(tx.amount) || 0;
+    const already = S.refundedAmount(tx.id);
+    const remain = Math.round((total - already) * 100) / 100;
+    const accs = S.listAccounts();
+    const st = { mode: remain > 0 ? 'full' : 'part', date: S.nowDate(), note: '', toAccountId: tx.accountId || (accs[0] || {}).id };
+    const isExpense = tx.type === 'expense';
+
+    function amountOf(body) {
+      if (st.mode === 'full') return remain;
+      return Math.round((parseFloat($('#rfAmount', body).value) || 0) * 100) / 100;
+    }
+    function preview(body) {
+      const amt = amountOf(body);
+      const eff = isExpense ? `原支出减少 ${cm.sym}${money(amt)}` : `原收入减少 ${cm.sym}${money(amt)}`;
+      const bal = isExpense ? '账户余额增加' : '账户余额减少';
+      $('#rfPreview', body).innerHTML = amt > 0
+        ? `退款 <b>${cm.sym}${money(amt)} ${esc(tx.currency)}</b> · ${eff} · ${bal} ${cm.sym}${money(amt)}`
+        : '请输入退款金额';
+    }
+
+    openSheet(`
+      <div class="sheet-handle"></div>
+      <div class="field"><label>原记录</label>
+        <div class="muted" style="font-size:14px">${esc(S.catMeta(tx.type, tx.category).name)} · ${cm.sym}${money(total)} ${esc(tx.currency)} · ${esc(tx.date)}
+        ${already > 0 ? `<br>已退 ${cm.sym}${money(already)}，本次最多可退 ${cm.sym}${money(remain)}` : ''}</div>
+      </div>
+      <div class="seg" id="rfMode">
+        <button data-m="full" class="${st.mode === 'full' ? 'on-expense' : ''}">全额退款</button>
+        <button data-m="part" class="${st.mode === 'part' ? 'on-expense' : ''}">部分退款</button>
+      </div>
+      <div class="field" id="rfAmtField" style="margin-top:14px" ${st.mode === 'full' ? 'hidden' : ''}>
+        <label>退款金额（${esc(tx.currency)}，最多 ${money(remain)}）</label>
+        <input class="input" id="rfAmount" type="number" inputmode="decimal" placeholder="0.00" />
+      </div>
+      <div class="muted" id="rfPreview" style="font-size:13px;margin:-4px 0 12px"></div>
+      <div class="field"><label>退回账户（默认原路退回）</label>
+        <select class="select" id="rfAcc">${accs.map((a) => `<option value="${a.id}" ${a.id === st.toAccountId ? 'selected' : ''}>${a.icon} ${esc(a.name)}（${esc(a.currency)}）</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>退款日期</label><input class="input" id="rfDate" type="date" value="${st.date}" /></div>
+      <div class="field"><label>备注</label><textarea class="input" id="rfNote" placeholder="可选，如「商家退款」"></textarea></div>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn secondary" id="rfCancel">取消</button>
+        <button class="btn" id="rfSave">确认退款</button>
+      </div>
+    `, (body) => {
+      preview(body);
+      on(body, '#rfMode button', 'click', (e) => {
+        st.mode = e.currentTarget.dataset.m;
+        $$('#rfMode button', body).forEach((b) => b.classList.toggle('on-expense', b.dataset.m === st.mode));
+        $('#rfAmtField', body).hidden = st.mode === 'full';
+        preview(body);
+      });
+      $('#rfAmount', body).addEventListener('input', () => preview(body));
+      $('#rfAcc', body).addEventListener('change', (e) => { st.toAccountId = e.target.value; });
+      $('#rfCancel', body).addEventListener('click', closeSheet);
+      $('#rfSave', body).addEventListener('click', () => {
+        const amount = amountOf(body);
+        if (!(amount > 0)) { toast('请输入有效退款金额'); return; }
+        if (amount > remain + 0.005) { toast(`最多可退 ${remain} ${tx.currency}`); return; }
+        const r = S.addRefund({
+          parentId: tx.id, amount,
+          date: $('#rfDate', body).value || S.nowDate(),
+          note: $('#rfNote', body).value.trim(),
+          toAccountId: st.toAccountId
+        });
+        if (r.error) { toast(r.error); return; }
+        toast(st.mode === 'full' ? '已全额退款' : '已部分退款');
+        closeSheet();
+        refreshAfterChange();
+      });
     });
   }
 
@@ -380,6 +548,7 @@
       <div id="splitBox" hidden></div>
 
       <div class="btn-row" style="margin-top:14px">
+        ${tx ? '<button class="btn danger" id="sheetDel" style="flex:0 0 96px">删除</button>' : ''}
         <button class="btn secondary" id="sheetCancel">取消</button>
         <button class="btn" id="sheetSave">${tx ? '保存修改' : '保存'}</button>
       </div>
@@ -452,6 +621,16 @@
       });
 
       $('#sheetCancel', body).addEventListener('click', closeSheet);
+      const delBtn = $('#sheetDel', body);
+      if (delBtn) delBtn.addEventListener('click', () => {
+        if (!tx) return;
+        const extra = S.refundChildren(tx.id).length ? '<br>该记录已有退款，删除后退款也会一并移除。' : '';
+        confirmSheet({ title: '删除这条记录？', desc: `删除后账本收支与账户余额会相应恢复。<br>（删除会同步到你的其它设备）${extra}`, okText: '删除', danger: true }, () => {
+          S.deleteTransaction(tx.id);
+          toast('已删除');
+          refreshAfterChange();
+        });
+      });
       $('#sheetSave', body).addEventListener('click', () => {
         const amount = parseFloat($('#fAmount', body).value);
         if (!amount || amount <= 0) { toast('请输入有效金额'); return; }
@@ -813,7 +992,10 @@
     });
     on(list, '[data-del]', 'click', (e) => {
       e.stopPropagation();
-      if (confirm('确定删除这笔分账？')) { S.deleteSplit(e.currentTarget.dataset.del); toast('已删除'); renderSplit($('#appMain')); }
+      const sid = e.currentTarget.dataset.del;
+      confirmSheet({ title: '确定删除这笔分账？', okText: '删除', danger: true }, () => {
+        S.deleteSplit(sid); toast('已删除'); renderSplit($('#appMain'));
+      });
     });
   }
 
@@ -890,7 +1072,7 @@
     const base = led.baseCurrency;
     const data = S.load();
     const months = [];
-    data.transactions.filter((t) => S.belongsToLedger(t, led.id)).forEach((t) => {
+    data.transactions.filter((t) => !S.isDeleted(t) && S.belongsToLedger(t, led.id)).forEach((t) => {
       const m = (t.date || '').slice(0, 7);
       if (m && months.indexOf(m) < 0) months.push(m);
     });
@@ -1068,6 +1250,19 @@
           <div class="muted" style="text-align:right;margin:-6px 6px 8px">余额 ${fmtMoney(it.after, base)}</div>`;
       }
       const meta = S.catMeta(t.type, t.category);
+      if (t.type === 'refund') {
+        const dir = t.parentType === 'expense' ? '+' : '-';
+        const dc = S.currencyMeta(it.displayCurrency);
+        return `<div class="tx-item" data-id="${t.id}">
+            <div class="tx-emoji">↩️</div>
+            <div class="tx-mid">
+              <div class="tx-cat">退款 <span class="pill refund">${t.parentType === 'income' ? '收入退回' : '支出退回'}</span></div>
+              <div class="tx-note">${fmtDate(t.date)}${t.note ? ' · ' + esc(t.note) : ''}</div>
+            </div>
+            <div class="tx-amt refund">${dir}${dc.sym}${money(it.displayAmount)}<span class="tx-code">${esc(it.displayCurrency)}</span></div>
+          </div>
+          <div class="muted" style="text-align:right;margin:-6px 6px 8px">余额 ${fmtMoney(it.after, base)}</div>`;
+      }
       const sign = t.type === 'income' ? '+' : '-';
       const cls = t.type === 'income' ? 'inc' : 'exp';
       return `<div class="tx-item" data-id="${t.id}">
@@ -1097,15 +1292,16 @@
       on($('#accTx', body), '.tx-item', 'click', (e) => {
         const t = S.getTransaction(e.currentTarget.dataset.id);
         if (!t) return;
-        if (t.type === 'transfer') openTransferSheet(t);
-        else openRecordSheet(t);
+        openTxActions(t);
       });
       $('#accTransfer', body).addEventListener('click', () => { closeSheet(); openTransferSheet(null, { fromId: id }); });
       $('#accEdit', body).addEventListener('click', () => { closeSheet(); openAccountEditor(id, acc.ledgerId, () => openAccountDetail(id)); });
       $('#accDel', body).addEventListener('click', () => {
-        if (!confirm('删除该付款方式？有流水的账户不可删除。')) return;
-        if (S.deleteAccount(id)) { toast('已删除'); closeSheet(); renderMe($('#appMain')); }
-        else toast('该付款方式已有流水，无法删除');
+        closeSheet();
+        confirmSheet({ title: '删除该付款方式？', desc: '有流水的账户不可删除。', okText: '删除', danger: true }, () => {
+          if (S.deleteAccount(id)) { toast('已删除'); renderMe($('#appMain')); }
+          else toast('该付款方式已有流水，无法删除');
+        });
       });
     });
   }
@@ -1237,10 +1433,10 @@
       catch (e) { toast('JSON 格式错误'); }
     });
     $('#clearBtn').addEventListener('click', () => {
-      if (confirm('确定清空所有记账、分账与账本数据？此操作不可恢复！')) {
+      confirmSheet({ title: '确定清空所有数据？', desc: '记账、分账与账本数据将全部清除，<b>此操作不可恢复</b>！', okText: '清空', danger: true }, () => {
         localStorage.removeItem('ledger_data_v1'); S.ensureSeed();
         currentLedgerId = S.defaultLedger().id; toast('已清空'); renderMe($('#appMain'));
-      }
+      });
     });
     renderCloudBody();
   }
