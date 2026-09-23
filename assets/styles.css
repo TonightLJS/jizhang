@@ -322,3 +322,10 @@ textarea.input { resize: none; min-height: 70px; }
 }
 .quick-tip { color: #8a8f98; font-size: 12px; margin-bottom: 6px; }
 #scUrl { font-family: ui-monospace, Menlo, monospace; }
+
+/* ===== 日期 / 时间（精确到分钟） ===== */
+.dt-row { display: flex; gap: 8px; }
+.dt-row .input { flex: 1; min-width: 0; }
+.dt-row .dt-time { flex: 0 0 118px; }
+/* 明细行尾部的灰色时间戳 */
+.tx-time { color: #9aa0a6; font-size: 12px; margin-left: 6px; white-space: nowrap; }
