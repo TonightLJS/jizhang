@@ -668,7 +668,7 @@
     const st = {
       editId: tx ? tx.id : null,
       type: tx ? tx.type : 'expense',
-      category: tx ? tx.category : S.getCategories('expense')[0].key,
+      category: tx ? tx.category : ((S.getCategories('expense')[0] || {}).key || 'other_exp'),
       ledgerId: led.id,
       accountId: tx ? tx.accountId : (S.listAccounts()[0] || {}).id || null,
       currency: tx ? tx.currency : led.currency,
@@ -734,7 +734,7 @@
         $$('#typeSeg button', body).forEach((b) =>
           b.classList.toggle('on-expense', b.dataset.type === 'expense' && st.type === 'expense') ||
           b.classList.toggle('on-income', b.dataset.type === 'income' && st.type === 'income'));
-        st.category = cats()[0].key;
+        st.category = (cats()[0] || {}).key || 'other_exp';
         $('#catGrid', body).innerHTML = catHTML();
         bindCatGrid(body, st);
       });
@@ -1488,21 +1488,65 @@
   }
 
   /* ---------------- 类别管理 ---------------- */
+  // 用「列表 + ↑↓」而不是 chips：类别多的时候 chips 挤成一团，上下箭头又没地方放，
+  // 而手机上拖拽排序很难点准，所以给每行直接提供上移/下移按钮。
   function renderCatManager(box, type) {
     const title = type === 'income' ? '收入类别' : '支出类别';
     const cats = S.getCategories(type);
-    box.innerHTML = `<div class="muted" style="margin:8px 0 6px">${title}</div>
-      <div class="chips">${cats.map((c) => `<span class="chip cat-chip" data-key="${c.key}">${c.emoji} ${esc(c.name)} <span class="chip-x" data-del="${c.key}">✕</span></span>`).join('')}
-      <span class="chip chip-add" data-add="${type}">＋ 添加</span></div>`;
+    box.innerHTML = `
+      <div class="cat-mgr-head">
+        <span class="cat-mgr-title">${title}</span>
+        <span class="cat-mgr-hint">用 ↑ ↓ 调整顺序</span>
+      </div>
+      <div class="cat-rows">${cats.map((c, i) => `
+        <div class="cat-row" data-key="${c.key}">
+          <span class="cat-row-emoji">${c.emoji}</span>
+          <span class="cat-row-name">${esc(c.name)}</span>
+          <span class="cat-row-ops">
+            <button class="icon-btn" data-up="${c.key}" ${i === 0 ? 'disabled' : ''} title="上移" aria-label="上移">↑</button>
+            <button class="icon-btn" data-down="${c.key}" ${i === cats.length - 1 ? 'disabled' : ''} title="下移" aria-label="下移">↓</button>
+            <button class="icon-btn" data-edit="${c.key}" title="编辑" aria-label="编辑">✏️</button>
+            <button class="icon-btn danger" data-del="${c.key}" title="删除" aria-label="删除">✕</button>
+          </span>
+        </div>`).join('')}
+      </div>
+      <button class="btn secondary cat-add-btn" data-add="${type}">＋ 添加${type === 'income' ? '收入' : '支出'}类别</button>`;
+
+    const rerender = () => renderCatManager(box, type);
+    // 在「我的」页时 refreshAfterChange() 会重建 #catExp/#catInc（box 随之失效，
+    // 新元素上已挂好监听），所以只有 box 仍在文档里时才就地兜底重渲染
+    const afterChange = () => {
+      refreshAfterChange();
+      if (box.isConnected) rerender();
+    };
+
+    on(box, '[data-up]', 'click', (e) => {
+      e.stopPropagation();
+      if (S.moveCategory(type, e.currentTarget.dataset.up, -1)) afterChange();
+    });
+    on(box, '[data-down]', 'click', (e) => {
+      e.stopPropagation();
+      if (S.moveCategory(type, e.currentTarget.dataset.down, 1)) afterChange();
+    });
+    on(box, '[data-edit]', 'click', (e) => {
+      e.stopPropagation();
+      openCategoryEditor(type, e.currentTarget.dataset.edit);
+    });
     on(box, '[data-del]', 'click', (e) => {
       e.stopPropagation();
       const key = e.currentTarget.dataset.del;
       if (S.getCategories(type).length <= 1) { toast('至少保留一个类别'); return; }
-      S.deleteCategory(type, key); toast('已删除');
-      if (type === 'expense') renderCatManager($('#catExp'), 'expense');
-      else renderCatManager($('#catInc'), 'income');
+      const name = S.catMeta(type, key).name;
+      confirmSheet({
+        title: `删除类别「${name}」？`,
+        desc: '已用这个类别记过的账不会被删除，只是不再出现在选择列表里。',
+        okText: '删除', danger: true
+      }, () => { S.deleteCategory(type, key); toast('已删除'); afterChange(); });
     });
-    on(box, '[data-add]', 'click', () => openCategoryEditor(type, null));
+    on(box, '[data-add]', 'click', (e) => {
+      e.stopPropagation();
+      openCategoryEditor(type, null);
+    });
   }
 
   function openCategoryEditor(type, key) {
@@ -1529,8 +1573,8 @@
         if (cat) { S.updateCategory(type, key, { name, emoji: state.emoji }); toast('已保存'); }
         else { S.addCategory(type, { name, emoji: state.emoji }); toast('已添加'); }
         closeSheet();
-        if (type === 'expense') renderCatManager($('#catExp'), 'expense');
-        else renderCatManager($('#catInc'), 'income');
+        // 整页刷新：类别顺序会同时影响「记录」页的分类网格，一并更新
+        refreshAfterChange();
       });
     });
   }
