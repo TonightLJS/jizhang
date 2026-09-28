@@ -125,6 +125,40 @@
     });
     return Object.keys(map).map(function (k) { return map[k]; });
   }
+  // 类别：可自定义的有序集合，按 key 并集合并（同 mergeArray 的「较新者胜」）。
+  // ⚠️ 过去这里是 `cloud.categories || local.categories`，即云端整份覆盖本地 ——
+  //    导致本地新增的类别一同步就被云端旧副本冲掉、删掉的类别又被云端复活。
+  //    现在改成逐条合并 + 墓碑 + order 字段承载顺序。
+  function mergeCatList(a, b) {
+    var map = {}, seq = {}, n = 0, out = [];
+    function put(list) {
+      (list || []).forEach(function (c, i) {
+        if (!c || !c.key) return;
+        var rec = Object.assign({}, c, {
+          order: typeof c.order === 'number' ? c.order : i,
+          updatedAt: updatedAtOf(c)
+        });
+        var ex = map[rec.key];
+        if (!ex) { map[rec.key] = rec; seq[rec.key] = n++; out.push(rec); }
+        else if ((rec.updatedAt || 0) > (ex.updatedAt || 0)) map[rec.key] = rec;
+        // 相等 → 保留本地，更安全
+      });
+    }
+    put(a); put(b);
+    return out
+      .map(function (c) { return map[c.key]; })
+      .sort(function (x, y) {
+        return (x.order || 0) - (y.order || 0) || (seq[x.key] - seq[y.key]);
+      });
+  }
+  function mergeCategories(local, cloud) {
+    if (!local) return cloud;
+    if (!cloud) return local;
+    return {
+      expense: mergeCatList(local.expense, cloud.expense),
+      income: mergeCatList(local.income, cloud.income)
+    };
+  }
   function mergeData(local, cloud) {
     if (!cloud) return local;
     return {
@@ -133,7 +167,7 @@
       ledgers: mergeArray(local.ledgers, cloud.ledgers),
       clears: mergeArray(local.clears, cloud.clears),
       accounts: mergeArray(local.accounts, cloud.accounts),
-      categories: cloud.categories || local.categories,
+      categories: mergeCategories(local.categories, cloud.categories),
       settings: Object.assign({}, cloud.settings || {}, local.settings || {})
     };
   }
