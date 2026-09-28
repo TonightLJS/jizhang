@@ -58,36 +58,111 @@
     return CURRENCIES.find((c) => c.code === code) || { code: code || 'CNY', sym: '¥', name: code || 'CNY' };
   }
 
-  // 类别（可自定义增删）读取自 data.categories
+  /* ---------------- 类别（可自定义增删 / 排序，且参与云端合并） ----------------
+   * 每条类别：{ key, name, emoji, order, updatedAt, deleted?, deletedAt? }
+   *  · order     —— 显示顺序（升序）。新增 = max(order)+1 追加到末尾，所以顺序可自定义
+   *  · updatedAt —— 改名 / 换图标 / 调序时刷新，供云端按「较新者胜」合并
+   *  · deleted   —— 删除打墓碑而**不物理移除**，否则云端旧副本会把它复活
+   *    （这正是「删掉别的类别后，新加的类别也跟着消失」的根因之一：categories 过去
+   *      在合并时是「云端整份覆盖本地」，本地任何增删都会被云端旧副本冲掉。）
+   * 注意：历史账单可能引用已删除的类别 key，所以 catMeta() 连墓碑一起查，
+   *       保证老记录不会因为类别被删就显示成「其他」。
+   */
+  function catKey(type) { return type === 'income' ? 'income' : 'expense'; }
+  function catListRaw(data, k) {
+    if (!data.categories) data.categories = { expense: [], income: [] };
+    if (!Array.isArray(data.categories[k])) data.categories[k] = [];
+    return data.categories[k];
+  }
+  function catOrder(c, i) { return typeof c.order === 'number' ? c.order : (i || 0); }
+  // 按 order 升序；order 缺失时退回数组下标，保证老数据也有稳定顺序
+  function sortCats(list) {
+    return list.map((c, i) => ({ c, i }))
+      .sort((a, b) => (catOrder(a.c, a.i) - catOrder(b.c, b.i)) || (a.i - b.i))
+      .map((x) => x.c);
+  }
   function getCategories(type) {
-    const data = load();
-    const k = type === 'income' ? 'income' : 'expense';
-    return (data.categories && data.categories[k] ? data.categories[k] : []).slice();
+    return sortCats(catListRaw(load(), catKey(type)).filter((c) => !isDeleted(c)));
   }
   function catMeta(type, key) {
-    const list = getCategories(type);
-    return list.find((c) => c.key === key) || { name: '其他', emoji: '❓', key };
+    const list = catListRaw(load(), catKey(type));
+    return list.find((c) => c.key === key && !isDeleted(c))
+        || list.find((c) => c.key === key)          // 已删类别：仍返回原名给历史账单用
+        || { name: '其他', emoji: '❓', key };
+  }
+  // 按目标顺序回写 order；整份顺序算「一个值」，所以统一刷新 updatedAt，
+  // 让云端合并时整体取某一台设备的顺序，而不是两台设备的顺序交错混在一起
+  function _applyCatOrder(list, ordered) {
+    const now = Date.now();
+    ordered.forEach((c, idx) => {
+      const it = list.find((x) => x.key === c.key);
+      if (it) { it.order = idx; it.updatedAt = now; }
+    });
   }
   function addCategory(type, cat) {
     const data = load();
-    const k = type === 'income' ? 'income' : 'expense';
-    if (!data.categories) data.categories = { expense: [], income: [] };
+    const list = catListRaw(data, catKey(type));
+    const maxOrder = list.reduce((m, c, i) => Math.max(m, catOrder(c, i)), -1);
     const key = 'c_' + uid();
-    data.categories[k].push({ key, name: cat.name || '自定义', emoji: cat.emoji || '⭐' });
+    list.push({
+      key, name: cat.name || '自定义', emoji: cat.emoji || '⭐',
+      order: maxOrder + 1, updatedAt: Date.now()
+    });
     save(data);
     return key;
   }
   function updateCategory(type, key, patch) {
     const data = load();
-    const k = type === 'income' ? 'income' : 'expense';
-    const i = data.categories[k].findIndex((c) => c.key === key);
-    if (i >= 0) { data.categories[k][i] = Object.assign({}, data.categories[k][i], patch); save(data); }
+    const list = catListRaw(data, catKey(type));
+    const i = list.findIndex((c) => c.key === key);
+    if (i < 0) return false;
+    list[i] = Object.assign({}, list[i], patch, { updatedAt: Date.now() });
+    save(data);
+    return true;
   }
+  /** 删除 = 打墓碑（不物理删除，否则云端旧副本会把它复活） */
   function deleteCategory(type, key) {
     const data = load();
-    const k = type === 'income' ? 'income' : 'expense';
-    data.categories[k] = data.categories[k].filter((c) => c.key !== key);
+    const list = catListRaw(data, catKey(type));
+    const i = list.findIndex((c) => c.key === key);
+    if (i < 0) return false;
+    const now = Date.now();
+    list[i] = Object.assign({}, list[i], { deleted: true, deletedAt: now, updatedAt: now });
     save(data);
+    return true;
+  }
+  /** 在有效类别里把 key 上移(-1)/下移(+1)；返回是否真的移动了 */
+  function moveCategory(type, key, delta) {
+    const data = load();
+    const list = catListRaw(data, catKey(type));
+    const sorted = sortCats(list.filter((c) => !isDeleted(c)));
+    const i = sorted.findIndex((c) => c.key === key);
+    if (i < 0) return false;
+    const j = i + Number(delta || 0);
+    if (j < 0 || j >= sorted.length) return false;
+    const moved = sorted.splice(i, 1)[0];
+    sorted.splice(j, 0, moved);
+    _applyCatOrder(list, sorted);
+    save(data);
+    return true;
+  }
+  /** 一次性设定整份顺序（留给拖拽排序用）：keys = 目标顺序的 key 数组 */
+  function reorderCategories(type, keys) {
+    if (!Array.isArray(keys)) return false;
+    const data = load();
+    const list = catListRaw(data, catKey(type));
+    const alive = sortCats(list.filter((c) => !isDeleted(c)));
+    const pos = {};
+    keys.forEach((k, idx) => { pos[k] = idx; });
+    let tail = keys.length;
+    const ordered = alive.slice().sort((a, b) => {
+      const pa = pos[a.key] == null ? tail++ : pos[a.key];
+      const pb = pos[b.key] == null ? tail++ : pos[b.key];
+      return pa - pb;
+    });
+    _applyCatOrder(list, ordered);
+    save(data);
+    return true;
   }
 
   function uid() {
@@ -200,8 +275,17 @@
       splits: alive(data.splits),
       ledgers: alive(data.ledgers),
       accounts: alive(data.accounts),
-      clears: alive(data.clears)
+      clears: alive(data.clears),
+      categories: stripCatTombstones(data.categories)
     });
+  }
+  function stripCatTombstones(cats) {
+    if (!cats) return cats;
+    const out = { expense: [], income: [] };
+    ['expense', 'income'].forEach((k) => {
+      out[k] = (cats[k] || []).filter((c) => !isDeleted(c));
+    });
+    return out;
   }
   function save(data) {
     _persist(data);
@@ -307,6 +391,14 @@
       };
       changed = true;
     }
+    // 类别补 order / updatedAt：老数据没有这两个字段，补上后才能自定义排序、
+    // 也才能在云端按「较新者胜」正确合并（否则自定义类别会被云端旧副本冲掉）
+    ['expense', 'income'].forEach((k) => {
+      (data.categories[k] || []).forEach((c, i) => {
+        if (typeof c.order !== 'number') { c.order = i; changed = true; }
+        if (c.updatedAt == null) { c.updatedAt = c.deletedAt || 0; changed = true; }
+      });
+    });
     data.settings = data.settings || {};
     if (!data.settings.accountsSeeded) {
       if (!data.accounts.length) seedDefaultAccounts(data, def.id);
@@ -1000,6 +1092,7 @@
     CATS_EXPENSE, CATS_INCOME, ACCOUNTS, CURRENCIES, LEDGER_ICONS, LEDGER_COLORS,
     CAT_EMOJIS, ACCOUNT_ICONS,
     currencyMeta, catMeta, getCategories, addCategory, updateCategory, deleteCategory,
+    moveCategory, reorderCategories,
     uid, nowDate, nowTime, normTime, txTime, txSortKey, txDateTime, round2, load, save, ensureSeed, normalize,
     listLedgers, ledgerById, defaultLedger, ledgerForDate,
     addLedger, updateLedger, deleteLedger, setDefaultLedger, setCompanions, belongsToLedger,
